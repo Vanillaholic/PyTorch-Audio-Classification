@@ -8,19 +8,7 @@ import os
 import pandas as pd
 from sklearn.model_selection import train_test_split
 import swanlab
-import random
-import numpy as np
 
-# 设置随机种子
-def set_seed(seed=42):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 def create_dataset_csv():
     # 数据集根目录
@@ -66,26 +54,6 @@ class AudioDataset(Dataset):
             n_mels=128
         )
         mel_spectrogram = transform(waveform)
-        
-        # 仅在训练模式下进行数据增强
-        if self.train_mode:
-            # 1. 时间遮蔽 (Time Masking)：通过随机选择一个时间步，然后遮蔽掉20个时间步
-            time_mask = torchaudio.transforms.TimeMasking(time_mask_param=20)
-            mel_spectrogram = time_mask(mel_spectrogram)
-            
-            # 2. 频率遮蔽 (Frequency Masking)：通过随机选择一个频率步，然后遮蔽掉20个频率步
-            freq_mask = torchaudio.transforms.FrequencyMasking(freq_mask_param=20)
-            mel_spectrogram = freq_mask(mel_spectrogram)
-            
-            # 3. 随机增加高斯噪声
-            if random.random() < 0.5:
-                noise = torch.randn_like(mel_spectrogram) * 0.01
-                mel_spectrogram = mel_spectrogram + noise
-            
-            # 4. 随机调整响度
-            if random.random() < 0.5:
-                gain = random.uniform(0.8, 1.2)
-                mel_spectrogram = mel_spectrogram * gain
 
         # 确保数值在合理范围内
         mel_spectrogram = torch.clamp(mel_spectrogram, min=0)
@@ -104,36 +72,30 @@ class AudioClassifier(nn.Module):
     def __init__(self, num_classes):
         super(AudioClassifier, self).__init__()
         # 加载预训练的ResNet
-        self.resnet = models.resnext101_32x8d(weights=models.ResNeXt101_32X8D_Weights.IMAGENET1K_V1)
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         # 修改最后的全连接层
-        self.resnet.fc = nn.Linear(2048, num_classes)
+        self.resnet.fc = nn.Linear(512, num_classes)
         
     def forward(self, x):
         return self.resnet(x)
 
 # 训练函数
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, run):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device):
+    
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         correct = 0
         total = 0
         
-        # 前5个epoch进行warmup
-        if epoch < 5:
-            warmup_factor = (epoch + 1) / 5
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = run.config.learning_rate * warmup_factor
-        
-        # optimizer.zero_grad()  # 移到循环外部
-        
         for i, (inputs, labels) in enumerate(train_loader):
             inputs, labels = inputs.to(device), labels.to(device)
             
             outputs = model(inputs)
             loss = criterion(outputs, labels)
-            loss.backward()
             
+            loss.backward()
+
             optimizer.step()
             optimizer.zero_grad()
             
@@ -143,7 +105,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
         
-        train_loss = running_loss
+        train_loss = running_loss/len(train_loader)
         train_acc = 100.*correct/total
         
         # 验证阶段
@@ -165,9 +127,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         val_loss = val_loss/len(val_loader)
         val_acc = 100.*correct/total
         
-        # 只在warmup结束后使用学习率调度器
-        if epoch >= 5:
-            scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
         # 记录训练和验证指标
@@ -187,21 +146,17 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
 # 主函数
 def main():
-    # 设置随机种子
-    set_seed(42)
-    
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     run = swanlab.init(
         project="PyTorch_Audio_Classification-simple",
-        experiment_name="resnext101_32x8d",
+        experiment_name="resnet18",
         config={
             "batch_size": 16,
             "learning_rate": 1e-4,
-            "num_epochs": 30,
-            "resize": 512,
-            "weight_decay": 0  # 添加到配置中
+            "num_epochs": 20,
+            "resize": 224,
         },
     )
     
@@ -230,28 +185,15 @@ def main():
     
     # 创建模型
     num_classes = len(df['label'].unique())  # 根据实际分类数量设置
+    print("num_classes", num_classes)
     model = AudioClassifier(num_classes).to(device)
     
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(
-        model.parameters(), 
-        lr=run.config.learning_rate,
-        weight_decay=run.config.weight_decay
-    )  # Adam优化器
-    
-    # 添加学习率调度器
-    scheduler = optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=10,  # 在第10个epoch衰减
-        gamma=0.1,     # 衰减率为0.1
-        verbose=True
-    )
+    optimizer = optim.Adam(model.parameters(), lr=run.config.learning_rate)  
     
     # 训练模型
-    train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, 
-                num_epochs=run.config.num_epochs, device=device, run=run)
-    
+    train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=run.config.num_epochs, device=device)
 
 if __name__ == "__main__":
     main()
