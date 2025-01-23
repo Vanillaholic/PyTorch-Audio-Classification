@@ -104,7 +104,8 @@ class AudioClassifier(nn.Module):
     def __init__(self, num_classes):
         super(AudioClassifier, self).__init__()
         # 加载预训练的ResNet
-        self.resnet = models.resnext101_32x8d(weights=models.ResNeXt101_32X8D_Weights.IMAGENET1K_V1)
+        #self.resnet = models.resnext101_32x8d(weights=models.ResNeXt101_32X8D_Weights.IMAGENET1K_V1)
+        self.resnet = models.resnext101_32x8d(pretrained=True)
         # 修改最后的全连接层
         self.resnet.fc = nn.Linear(2048, num_classes)
         

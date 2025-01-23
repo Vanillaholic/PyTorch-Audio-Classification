@@ -9,8 +9,13 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 import swanlab
 
+import argparse
+from utils import progress_bar #进度条
 
 def create_dataset_csv():
+    '''
+    创建数据集CSV文件
+    '''
     # 数据集根目录
     data_dir = './GTZAN/genres_original'
     data = []
@@ -73,6 +78,7 @@ class AudioClassifier(nn.Module):
         super(AudioClassifier, self).__init__()
         # 加载预训练的ResNet
         self.resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        #self.resnet = models.resnet18(pretrained=True)
         # 修改最后的全连接层
         self.resnet.fc = nn.Linear(512, num_classes)
         
@@ -80,9 +86,9 @@ class AudioClassifier(nn.Module):
         return self.resnet(x)
 
 # 训练函数
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device):
+def train_model(model, train_loader, val_loader, criterion, optimizer, start,num_epochs, device):
     
-    for epoch in range(num_epochs):
+    for epoch in range(start,start+num_epochs):
         model.train()
         running_loss = 0.0
         correct = 0
@@ -107,6 +113,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
         train_loss = running_loss/len(train_loader)
         train_acc = 100.*correct/total
+
+        # 打印进度条，显示当前批次的损失和准确率
+        progress_bar(i, len(train_loader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                         % (train_loss/(i+1), 100.*correct/total, correct, total))
         
         # 验证阶段
         model.eval()
@@ -114,7 +124,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         correct = 0
         total = 0
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            for batch_idx ,(inputs, labels) in enumerate(val_loader):
                 inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -128,7 +138,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         val_acc = 100.*correct/total
         
         current_lr = optimizer.param_groups[0]['lr']
-        
+        # 打印进度条，显示当前批次的损失和准确率
+        progress_bar(batch_idx, len(val_loader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+                         % (val_loss/(batch_idx+1), 100.*correct/total, correct, total))
         # 记录训练和验证指标
         swanlab.log({
             "train/loss": train_loss,
@@ -138,62 +150,82 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             "train/epoch": epoch,
             "train/lr": current_lr
         })
+        
             
         print(f'Epoch {epoch+1}:')
         print(f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%')
         print(f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%')
         print(f'Learning Rate: {current_lr:.6f}')
 
-# 主函数
-def main():
+
+if __name__ == "__main__":
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 通过parser设置参数
+    parser = argparse.ArgumentParser()
     
+    parser.add_argument('--resume', '-r', default=False ,action='store_true',
+                        help='resume from checkpoint')
+    parser.add_argument('--batch_size',default=16)
+    parser.add_argument('--lr', default=1e-4, type=float, help='learning rate')
+    parser.add_argument('--num_epochs',default=20)
+    parser.add_argument('--resize',default=224,type=int,help='resize')
+    
+    args = parser.parse_args()
+    #加载进swanlab中
     run = swanlab.init(
-        project="PyTorch_Audio_Classification-simple",
-        experiment_name="resnet18",
-        config={
-            "batch_size": 16,
-            "learning_rate": 1e-4,
-            "num_epochs": 20,
-            "resize": 224,
-        },
+        project="PyTorch_Audio_Classification-newest",
+        experiment_name ="resnet18",
+        config=args
     )
-    
     # 生成或加载数据集CSV文件
     if not os.path.exists('audio_dataset.csv'):
         df = create_dataset_csv()
     else:
         df = pd.read_csv('audio_dataset.csv')
-    
+
     # 划分训练集和验证集
-    train_df = pd.DataFrame()
-    val_df = pd.DataFrame()
-    
+    train_df = pd.DataFrame()  # train_df 是训练集
+    val_df = pd.DataFrame()  # val_df 是测试集
+    '''数据处理'''
     for label in df['label'].unique():
-        label_df = df[df['label'] == label]
-        label_train, label_val = train_test_split(label_df, test_size=0.2, random_state=42)
+        label_df = df[df['label'] == label]  # 获取某一种音乐类型，比如只获取rock
+        label_train, label_val = train_test_split(label_df, test_size=0.2, random_state=42)  # 将数据进行拆分 训练集为80% 测试集为20%
         train_df = pd.concat([train_df, label_train])
         val_df = pd.concat([val_df, label_val])
-    
-    # 创建数据集和数据加载器 
-    train_dataset = AudioDataset(train_df, resize=run.config.resize, train_mode=True)
-    val_dataset = AudioDataset(val_df, resize=run.config.resize, train_mode=False)
-    
-    train_loader = DataLoader(train_dataset, batch_size=run.config.batch_size, shuffle=True)
+
+    # 创建数据集和数据加载器
+    train_dataset = AudioDataset(train_df, resize=args.resize, train_mode=True)
+    val_dataset = AudioDataset(val_df, resize=args.resize, train_mode=False)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-    
+
     # 创建模型
     num_classes = len(df['label'].unique())  # 根据实际分类数量设置
     print("num_classes", num_classes)
     model = AudioClassifier(num_classes).to(device)
-    
+
     # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=run.config.learning_rate)  
-    
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    # 判断是否需要从 checkpoint 恢复模型
+    if args.resume:
+        # 加载 checkpoint
+        print('==> Resuming from checkpoint..')
+        # 断言 checkpoint 目录存在
+        assert os.path.isdir('checkpoint'), 'Error: no checkpoint directory found!'
+        # 加载 checkpoint 文件
+        checkpoint = torch.load('./checkpoint/ckpt.pth')
+        # 加载模型参数
+        model.load_state_dict(checkpoint['model'])
+        # 加载最佳准确率
+        best_acc = checkpoint['acc']
+        # 加载起始 epoch
+        start_epoch = checkpoint['epoch']
+    else: 
+        start_epoch = 0
     # 训练模型
-    train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs=run.config.num_epochs, device=device)
-
-if __name__ == "__main__":
-    main()
+    train_model(model, train_loader, val_loader, criterion, optimizer,start=start_epoch,num_epochs=args.num_epochs,device=device)
+    swanlab.finish()
